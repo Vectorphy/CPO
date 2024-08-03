@@ -1,6 +1,1 @@
-# cogs/__init__.py
-
-from .pomodoro import Pomodoro
-from .checkin import CheckinCog
-
-__all__ = ["Pomodoro", "CheckinCog"]
+# This file can be left empty or used to set up package-level configurations

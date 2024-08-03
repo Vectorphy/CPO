@@ -1,167 +1,144 @@
-# cogs/pomodoro.py
-
 import discord
-from discord.ext import commands
+from discord import app_commands
+from discord.ext import commands, tasks
 import asyncio
 from datetime import datetime, timedelta
-from utils import parse_duration, is_manager_or_admin, handle_errors, DurationConverter
-from database import update_pomodoro_stats, create_pomodoro_group, add_group_member, remove_group_member, get_group_members, get_group_by_name
 
 class PomodoroSession:
-    def __init__(self, user_ids, voice_channel, work_duration=25*60, short_break=5*60, long_break=15*60):
-        self.user_ids = set(user_ids)
-        self.voice_channel = voice_channel
-        self.work_duration = work_duration
+    def __init__(self, group_id, focus, short_break, long_break):
+        self.group_id = group_id
+        self.focus = focus
         self.short_break = short_break
         self.long_break = long_break
-        self.cycle = 0
+        self.current_stage = "focus"
+        self.cycles = 0
+        self.is_paused = False
         self.timer = None
-        self.status = "Not Started"
-
-    async def start(self):
-        self.status = "Running"
-        while self.status == "Running":
-            await self.work_session()
-            if self.status != "Running":
-                break
-            await self.break_session()
-
-    async def work_session(self):
-        await self.start_timer(self.work_duration, "Work")
-
-    async def break_session(self):
-        self.cycle += 1
-        if self.cycle % 4 == 0:
-            await self.start_timer(self.long_break, "Long Break")
-        else:
-            await self.start_timer(self.short_break, "Short Break")
-
-    async def start_timer(self, duration, session_type):
-        end_time = datetime.now() + timedelta(seconds=duration)
-        while datetime.now() < end_time and self.status == "Running":
-            remaining = end_time - datetime.now()
-            await self.voice_channel.edit(name=f"{session_type}: {remaining.seconds // 60:02d}:{remaining.seconds % 60:02d}")
-            await asyncio.sleep(1)
-
-        if self.status == "Running":
-            mentions = " ".join(f"<@{user_id}>" for user_id in self.user_ids)
-            await self.voice_channel.send(f"{mentions} {session_type} session has ended!")
-
-    def stop(self):
-        self.status = "Stopped"
 
 class Pomodoro(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
-        self.active_sessions = {}
+        self.sessions = {}
 
-    @commands.group(invoke_without_command=True)
-    async def pomodoro(self, ctx):
-        """Manage Pomodoro sessions"""
-        await ctx.send_help(ctx.command)
-
-    @pomodoro.command(name="start")
-    @handle_errors
-    async def start_pomodoro(self, ctx, work: DurationConverter = 25*60, short_break: DurationConverter = 5*60, long_break: DurationConverter = 15*60):
-        """Start a Pomodoro session"""
-        if not ctx.author.voice or not ctx.author.voice.channel:
-            await ctx.send("You need to be in a voice channel to start a Pomodoro session.")
-            return
-
-        if ctx.author.id in self.active_sessions:
-            await ctx.send("You're already in an active Pomodoro session.")
-            return
-
-        session = PomodoroSession([ctx.author.id], ctx.author.voice.channel, work, short_break, long_break)
-        self.active_sessions[ctx.author.id] = session
-        await ctx.send(f"Pomodoro session started! Work: {work//60}min, Short break: {short_break//60}min, Long break: {long_break//60}min")
-        await session.start()
-
-        # Update user stats
-        update_pomodoro_stats(ctx.author.id)
-
-    @pomodoro.command(name="stop")
-    @handle_errors
-    async def stop_pomodoro(self, ctx):
-        """Stop your active Pomodoro session"""
-        if ctx.author.id in self.active_sessions:
-            session = self.active_sessions[ctx.author.id]
-            session.stop()
-            del self.active_sessions[ctx.author.id]
-            await ctx.send("Your Pomodoro session has been stopped.")
-        else:
-            await ctx.send("You don't have an active Pomodoro session.")
-
-    @pomodoro.group(name="group", invoke_without_command=True)
-    async def pomodoro_group(self, ctx):
-        """Manage Pomodoro groups"""
-        await ctx.send_help(ctx.command)
-
-    @pomodoro_group.command(name="create")
-    @handle_errors
-    async def create_group(self, ctx, group_name: str):
-        """Create a new Pomodoro group"""
-        group = get_group_by_name(group_name)
-        if group:
-            await ctx.send("A group with this name already exists.")
-        else:
-            create_pomodoro_group(group_name, ctx.author.id)
-            await ctx.send(f"Group '{group_name}' created successfully.")
-
-    @pomodoro_group.command(name="add")
-    @handle_errors
-    async def add_to_group(self, ctx, group_name: str, member: discord.Member):
-        """Add a member to a Pomodoro group"""
-        group = get_group_by_name(group_name)
+    @app_commands.command(name="start_pomodoro", description="Start a Pomodoro session for the study group")
+    @app_commands.describe(
+        focus="Focus duration in minutes",
+        short_break="Short break duration in minutes",
+        long_break="Long break duration in minutes"
+    )
+    async def start_pomodoro(self, interaction: discord.Interaction, focus: int = 25, short_break: int = 5, long_break: int = 15):
+        group = await self.bot.db.get_user_group(interaction.user.id)
         if not group:
-            await ctx.send("This group doesn't exist.")
-        elif group['creator_id'] != ctx.author.id:
-            await ctx.send("Only the group creator can add members.")
+            await interaction.response.send_message("You're not in any study group.", ephemeral=True)
+            return
+
+        if group[0] in self.sessions:
+            await interaction.response.send_message("A Pomodoro session is already in progress for this group.", ephemeral=True)
+            return
+
+        session = PomodoroSession(group[0], focus, short_break, long_break)
+        self.sessions[group[0]] = session
+
+        voice_channel_id = group[8]  # Assuming voice_channel_id is at index 8
+        if not voice_channel_id:
+            voice_channel = await interaction.guild.create_voice_channel(f"{group[1]} VC")
+            await self.bot.db.update_voice_channel(group[0], voice_channel.id)
         else:
-            add_group_member(group['group_id'], member.id)
-            await ctx.send(f"{member.display_name} has been added to the group '{group_name}'.")
+            voice_channel = interaction.guild.get_channel(voice_channel_id)
 
-    @pomodoro_group.command(name="remove")
-    @handle_errors
-    async def remove_from_group(self, ctx, group_name: str, member: discord.Member):
-        """Remove a member from a Pomodoro group"""
-        group = get_group_by_name(group_name)
-        if not group:
-            await ctx.send("This group doesn't exist.")
-        elif group['creator_id'] != ctx.author.id:
-            await ctx.send("Only the group creator can remove members.")
+        if interaction.user.voice:
+            await interaction.user.move_to(voice_channel)
         else:
-            remove_group_member(group['group_id'], member.id)
-            await ctx.send(f"{member.display_name} has been removed from the group '{group_name}'.")
-
-    @pomodoro_group.command(name="start")
-    @handle_errors
-    async def start_group_pomodoro(self, ctx, group_name: str, work: DurationConverter = 25*60, short_break: DurationConverter = 5*60, long_break: DurationConverter = 15*60):
-        """Start a Pomodoro session for a group"""
-        if not ctx.author.voice or not ctx.author.voice.channel:
-            await ctx.send("You need to be in a voice channel to start a group Pomodoro session.")
+            await interaction.response.send_message(f"Please join the voice channel {voice_channel.mention} to start the Pomodoro session.", ephemeral=True)
             return
 
-        group = get_group_by_name(group_name)
-        if not group:
-            await ctx.send("This group doesn't exist.")
+        await interaction.response.send_message(f"Pomodoro session started! Focus for {focus} minutes.")
+        self.run_timer.start(interaction.guild_id, group[0])
+
+    @app_commands.command(name="end_pomodoro", description="End the current Pomodoro session")
+    async def end_pomodoro(self, interaction: discord.Interaction):
+        group = await self.bot.db.get_user_group(interaction.user.id)
+        if not group or group[0] not in self.sessions:
+            await interaction.response.send_message("No active Pomodoro session for your group.", ephemeral=True)
             return
 
-        members = get_group_members(group['group_id'])
-        if ctx.author.id not in members:
-            await ctx.send("You're not a member of this group.")
+        self.run_timer.stop()
+        del self.sessions[group[0]]
+        await interaction.response.send_message("Pomodoro session ended.")
+
+    @app_commands.command(name="pause_pomodoro", description="Pause the current Pomodoro session")
+    async def pause_pomodoro(self, interaction: discord.Interaction):
+        group = await self.bot.db.get_user_group(interaction.user.id)
+        if not group or group[0] not in self.sessions:
+            await interaction.response.send_message("No active Pomodoro session for your group.", ephemeral=True)
             return
 
-        session = PomodoroSession(members, ctx.author.voice.channel, work, short_break, long_break)
-        for member_id in members:
-            self.active_sessions[member_id] = session
+        session = self.sessions[group[0]]
+        if session.is_paused:
+            await interaction.response.send_message("Session is already paused.", ephemeral=True)
+            return
 
-        await ctx.send(f"Group Pomodoro session started for '{group_name}'! Work: {work//60}min, Short break: {short_break//60}min, Long break: {long_break//60}min")
-        await session.start()
+        session.is_paused = True
+        await interaction.response.send_message("Pomodoro session paused.")
 
-        # Update user stats for all participants
-        for member_id in members:
-            update_pomodoro_stats(member_id)
+    @app_commands.command(name="resume_pomodoro", description="Resume the paused Pomodoro session")
+    async def resume_pomodoro(self, interaction: discord.Interaction):
+        group = await self.bot.db.get_user_group(interaction.user.id)
+        if not group or group[0] not in self.sessions:
+            await interaction.response.send_message("No active Pomodoro session for your group.", ephemeral=True)
+            return
+
+        session = self.sessions[group[0]]
+        if not session.is_paused:
+            await interaction.response.send_message("Session is not paused.", ephemeral=True)
+            return
+
+        session.is_paused = False
+        await interaction.response.send_message("Pomodoro session resumed.")
+
+    @tasks.loop(seconds=1)
+    async def run_timer(self, guild_id, group_id):
+        session = self.sessions[group_id]
+        if session.is_paused:
+            return
+
+        if session.timer is None:
+            session.timer = session.focus * 60
+
+        session.timer -= 1
+
+        if session.timer <= 0:
+            if session.current_stage == "focus":
+                session.cycles += 1
+                if session.cycles % 4 == 0:
+                    session.current_stage = "long_break"
+                    session.timer = session.long_break * 60
+                    await self.send_notification(guild_id, group_id, f"Focus session ended. Take a long break for {session.long_break} minutes!")
+                else:
+                    session.current_stage = "short_break"
+                    session.timer = session.short_break * 60
+                    await self.send_notification(guild_id, group_id, f"Focus session ended. Take a short break for {session.short_break} minutes!")
+            else:
+                session.current_stage = "focus"
+                session.timer = session.focus * 60
+                await self.send_notification(guild_id, group_id, f"Break ended. Focus for {session.focus} minutes!")
+
+    async def send_notification(self, guild_id, group_id, message):
+        guild = self.bot.get_guild(guild_id)
+        if guild:
+            group = await self.bot.db.get_study_group(guild_id)
+            if group:
+                _, session_role_id = await self.bot.db.get_group_roles(group[0])
+                session_role = guild.get_role(session_role_id)
+                if session_role:
+                    voice_channel_id = group[8]  # Assuming voice_channel_id is at index 8
+                    voice_channel = guild.get_channel(voice_channel_id)
+                    if voice_channel:
+                        await voice_channel.send(f"{session_role.mention} {message}")
+                    else:
+                        # Fallback to the first text channel if voice channel is not found
+                        channel = guild.text_channels[0]
+                        await channel.send(f"{session_role.mention} {message}")
 
 async def setup(bot):
     await bot.add_cog(Pomodoro(bot))
