@@ -2,11 +2,6 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 
-class SomeCog(commands.Cog):
-    def __init__(self, bot):
-        self.bot = bot
-        self.db = bot.db  # Access the database through the bot instance
-
 class PermissionLevel:
     BOT_DEVELOPER = 3
     GUILD_MANAGER = 2

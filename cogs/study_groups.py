@@ -2,12 +2,7 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 import asyncio
-from .manager import PermissionLevel
-
-class SomeCog(commands.Cog):
-    def __init__(self, bot):
-        self.bot = bot
-        self.db = bot.db  # Access the database through the bot instance
+from utils import is_manager, is_group_creator
 
 class StudyGroups(commands.Cog):
     def __init__(self, bot):
@@ -19,14 +14,8 @@ class StudyGroups(commands.Cog):
 
     @app_commands.command(name="create_group", description="Create a new study group")
     @app_commands.describe(name="Name of the study group", max_size="Maximum number of members")
+    @is_manager()
     async def create_group(self, interaction: discord.Interaction, name: str, max_size: int = 10):
-        manager_cog = self.bot.get_cog('Manager')
-        if manager_cog:
-            permission_level = await manager_cog.get_permission_level(interaction.guild_id, interaction.user.id)
-            if permission_level < PermissionLevel.GROUP_CREATOR:
-                await interaction.response.send_message("You don't have permission to create a group.", ephemeral=True)
-                return
-
         existing_group = await self.bot.db.get_study_group(interaction.guild_id)
         if existing_group:
             await interaction.response.send_message("A study group already exists in this server.", ephemeral=True)
@@ -36,7 +25,6 @@ class StudyGroups(commands.Cog):
         group_id = await self.bot.db.create_study_group(name, interaction.user.id, max_size, end_time, interaction.guild_id)
         await self.bot.db.add_group_member(group_id, interaction.user.id)
 
-        # Create roles for the group
         admin_role = await interaction.guild.create_role(name=f"Study Group: {name}")
         session_role = await self.create_session_role(interaction.guild, name)
         
@@ -75,7 +63,6 @@ class StudyGroups(commands.Cog):
         if session_role:
             await interaction.user.add_roles(session_role)
 
-        # Move user to voice channel if it exists
         voice_channel_id = group[8]  # Assuming voice_channel_id is at index 8
         if voice_channel_id:
             voice_channel = interaction.guild.get_channel(voice_channel_id)
@@ -102,7 +89,7 @@ class StudyGroups(commands.Cog):
 
         await self.bot.db.remove_group_member(group[0], interaction.user.id)
         
-        admin_role_id, session_role_id = await self.bot.db.get_group_roles(group[0])
+        _, session_role_id = await self.bot.db.get_group_roles(group[0])
         session_role = interaction.guild.get_role(session_role_id)
         
         if session_role:
@@ -115,14 +102,8 @@ class StudyGroups(commands.Cog):
             await self.end_group(interaction.guild_id)
 
     @app_commands.command(name="end_group", description="End the current study group")
+    @is_group_creator()
     async def end_group_command(self, interaction: discord.Interaction):
-        manager_cog = self.bot.get_cog('Manager')
-        if manager_cog:
-            is_creator = await manager_cog.is_group_creator(interaction.guild_id, interaction.user.id)
-            if not is_creator:
-                await interaction.response.send_message("Only the group creator can end the group.", ephemeral=True)
-                return
-
         group = await self.bot.db.get_study_group(interaction.guild_id)
         if not group:
             await interaction.response.send_message("No study group exists in this server.", ephemeral=True)

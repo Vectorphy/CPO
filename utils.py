@@ -1,5 +1,6 @@
 import re
 import discord
+from discord.ext import commands
 
 def parse_duration(duration_str):
     match = re.match(r'(\d+)\s*(s|secs?|seconds?|m|mins?|minutes?|h|hrs?|hours?|d|days?)', duration_str, re.IGNORECASE)
@@ -37,14 +38,19 @@ def parse_mentions(ctx, mentions):
     
     return list(set(members))  # Remove duplicates
 
-def is_manager(ctx):
-    guild_id = ctx.guild.id
-    if guild_id not in ctx.bot.manager_roles:
-        ctx.bot.manager_roles[guild_id] = []
-    if guild_id not in ctx.bot.manager_members:
-        ctx.bot.manager_members[guild_id] = []
-    
-    user_roles = ctx.author.roles
-    return (ctx.author.guild_permissions.administrator or 
-            any(role.id in ctx.bot.manager_roles[guild_id] for role in user_roles) or 
-            ctx.author.id in ctx.bot.manager_members[guild_id])
+def is_manager():
+    async def predicate(ctx):
+        manager_cog = ctx.bot.get_cog('Manager')
+        if manager_cog:
+            permission_level = await manager_cog.get_permission_level(ctx.guild.id, ctx.author.id)
+            return permission_level >= manager_cog.PermissionLevel.GUILD_MANAGER
+        return False
+    return commands.check(predicate)
+
+def is_group_creator():
+    async def predicate(ctx):
+        manager_cog = ctx.bot.get_cog('Manager')
+        if manager_cog:
+            return await manager_cog.is_group_creator(ctx.guild.id, ctx.author.id)
+        return False
+    return commands.check(predicate)

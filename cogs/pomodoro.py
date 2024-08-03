@@ -1,15 +1,8 @@
-# cogs/pomodoro.py
-
 import discord
 from discord import app_commands
 from discord.ext import commands, tasks
 import asyncio
 from datetime import datetime, timedelta
-
-class SomeCog(commands.Cog):
-    def __init__(self, bot):
-        self.bot = bot
-        self.db = bot.db  # Access the database through the bot instance
 
 class PomodoroSession:
     def __init__(self, group_id, focus, short_break, long_break):
@@ -46,7 +39,6 @@ class Pomodoro(commands.Cog):
         session = PomodoroSession(group[0], focus, short_break, long_break)
         self.sessions[group[0]] = session
 
-        # Create or get the voice channel
         voice_channel_id = group[8]  # Assuming voice_channel_id is at index 8
         if not voice_channel_id:
             voice_channel = await interaction.guild.create_voice_channel(f"{group[1]} VC")
@@ -54,7 +46,6 @@ class Pomodoro(commands.Cog):
         else:
             voice_channel = interaction.guild.get_channel(voice_channel_id)
 
-        # Move the user to the voice channel
         if interaction.user.voice:
             await interaction.user.move_to(voice_channel)
         else:
